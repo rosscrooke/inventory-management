@@ -1,8 +1,13 @@
+import uuid
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+
+# In-memory store for submitted restocking orders (reset on server restart)
+submitted_orders: list = []
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -120,6 +125,15 @@ class CreatePurchaseOrderRequest(BaseModel):
     expected_delivery_date: str
     notes: Optional[str] = None
 
+class RestockingItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_cost: float
+
+class RestockingOrderRequest(BaseModel):
+    items: List[RestockingItem]
+
 # API endpoints
 @app.get("/")
 def root():
@@ -149,7 +163,8 @@ def get_orders(
     month: Optional[str] = None
 ):
     """Get all orders with optional filtering"""
-    filtered_orders = apply_filters(orders, warehouse, category, status)
+    # Merge regular orders with in-memory submitted restocking orders
+    filtered_orders = apply_filters(orders + submitted_orders, warehouse, category, status)
     filtered_orders = filter_by_month(filtered_orders, month)
     return filtered_orders
 
@@ -303,6 +318,32 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.post("/api/restocking/submit", response_model=Order)
+def submit_restocking_order(request: RestockingOrderRequest):
+    """Submit a restocking order; appended to in-memory submitted_orders list."""
+    order_date = datetime.now()
+    expected_delivery = order_date + timedelta(days=14)
+    order_id = str(uuid.uuid4())
+
+    new_order = {
+        "id": order_id,
+        "order_number": f"RST-{order_date.strftime('%Y%m%d')}-{order_id[:6].upper()}",
+        "customer": "Internal Restocking",
+        "items": [
+            {"sku": i.sku, "name": i.name, "quantity": i.quantity, "unit_price": i.unit_cost}
+            for i in request.items
+        ],
+        "status": "Submitted",
+        "order_date": order_date.strftime("%Y-%m-%dT%H:%M:%S"),
+        "expected_delivery": expected_delivery.strftime("%Y-%m-%dT%H:%M:%S"),
+        "total_value": round(sum(i.quantity * i.unit_cost for i in request.items), 2),
+        "actual_delivery": None,
+        "warehouse": None,
+        "category": None,
+    }
+    submitted_orders.append(new_order)
+    return new_order
 
 if __name__ == "__main__":
     import uvicorn
